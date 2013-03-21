@@ -62,9 +62,9 @@ static struct kmem_cache *mptcp_cb_cache __read_mostly;
 int sysctl_mptcp_ndiffports __read_mostly = 1;
 int sysctl_mptcp_enabled __read_mostly = 1;
 int sysctl_mptcp_checksum __read_mostly = 1;
-int sysctl_mptcp_debug __read_mostly = 0;
-int sysctl_mptcp_syn_retries __read_mostly = MPTCP_SYN_RETRIES;
+int sysctl_mptcp_debug __read_mostly;
 EXPORT_SYMBOL(sysctl_mptcp_debug);
+int sysctl_mptcp_syn_retries __read_mostly = MPTCP_SYN_RETRIES;
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table mptcp_table[] = {
@@ -219,6 +219,16 @@ static void mptcp_sock_destruct(struct sock *sk)
 	}
 }
 
+void mptcp_destroy_sock(struct sock *sk)
+{
+	if (is_meta_sk(sk)) {
+		__skb_queue_purge(&tcp_sk(sk)->mpcb->reinject_queue);
+		mptcp_purge_ofo_queue(tcp_sk(sk));
+	} else {
+		mptcp_del_sock(sk);
+	}
+}
+
 static void mptcp_set_state(struct sock *sk)
 {
 	struct sock *meta_sk = mptcp_meta_sk(sk);
@@ -349,7 +359,7 @@ static void mptcp_mpcb_inherit_sockopts(struct sock *meta_sk, struct sock *maste
 	 * Socket-options on the todo-list
 	 * ======
 	 * SO_BINDTODEVICE - should probably prevent creation of new subsocks
-	 * 		     across other devices. - what about the api-draft?
+	 *		     across other devices. - what about the api-draft?
 	 * SO_DEBUG
 	 * SO_REUSEADDR - probably we don't care about this
 	 * SO_DONTROUTE, SO_BROADCAST
@@ -438,8 +448,8 @@ int mptcp_backlog_rcv(struct sock *meta_sk, struct sk_buff *skb)
 	return ret;
 }
 
-static struct lock_class_key meta_key;
-static struct lock_class_key meta_slock_key;
+struct lock_class_key meta_key;
+struct lock_class_key meta_slock_key;
 
 /* Code heavily inspired from sk_clone() */
 int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk, int family,
@@ -455,11 +465,11 @@ int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk, int family,
 	if (sk->sk_family == AF_INET) {
 		memcpy(newsk, sk, offsetof(struct sock, sk_dontcopy_begin));
 		memcpy(&newsk->sk_dontcopy_end, &sk->sk_dontcopy_end,
-			sizeof(struct tcp_sock) - offsetof(struct sock, sk_dontcopy_end));
+		       sizeof(struct tcp_sock) - offsetof(struct sock, sk_dontcopy_end));
 	} else {
 		memcpy(newsk, sk, offsetof(struct sock, sk_dontcopy_begin));
 		memcpy(&newsk->sk_dontcopy_end, &sk->sk_dontcopy_end,
-			sizeof(struct tcp6_sock) - offsetof(struct sock, sk_dontcopy_end));
+		       sizeof(struct tcp6_sock) - offsetof(struct sock, sk_dontcopy_end));
 	}
 
 #ifdef CONFIG_SECURITY_NETWORK
@@ -469,7 +479,8 @@ int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk, int family,
 
 	/* Has been changed by sock_copy above - we may need an IPv6-socket */
 	newsk->sk_family = family;
-	newsk->sk_prot = newsk->sk_prot_creator = prot;
+	newsk->sk_prot = prot;
+	newsk->sk_prot_creator = prot;
 	inet_csk(newsk)->icsk_af_ops = af_ops;
 
 	/* We don't yet have the mptcp-point. Thus we still need inet_sock_destruct */
@@ -485,13 +496,14 @@ int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk, int family,
 	/* Unlocks are in:
 	 *
 	 * 1. If we are creating the master-sk
-	 * 	* on client-side in tcp_rcv_state_process, "case TCP_SYN_SENT"
-	 * 	* on server-side in tcp_child_process
+	 *	* on client-side in tcp_rcv_state_process, "case TCP_SYN_SENT"
+	 *	* on server-side in tcp_child_process
 	 * 2. If we are creating another subsock
-	 * 	* Also in tcp_child_process
+	 *	* Also in tcp_child_process
 	 */
 	bh_lock_sock(newsk);
-	newsk->sk_backlog.head	= newsk->sk_backlog.tail = NULL;
+	newsk->sk_backlog.head = NULL;
+	newsk->sk_backlog.tail = NULL;
 	newsk->sk_backlog.len = 0;
 
 	atomic_set(&newsk->sk_rmem_alloc, 0);
@@ -515,7 +527,6 @@ int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk, int family,
 	newsk->sk_send_head	= NULL;
 	newsk->sk_userlocks	= sk->sk_userlocks & ~SOCK_BINDPORT_LOCK;
 
-	tcp_sk(newsk)->mpc = 0;
 	tcp_sk(newsk)->mptcp = NULL;
 
 	sock_reset_flag(newsk, SOCK_DONE);
@@ -563,7 +574,7 @@ int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk, int family,
 		percpu_counter_inc(newsk->sk_prot->sockets_allocated);
 
 	if (sock_flag(newsk, SOCK_TIMESTAMP) ||
-		sock_flag(newsk, SOCK_TIMESTAMPING_RX_SOFTWARE))
+	    sock_flag(newsk, SOCK_TIMESTAMPING_RX_SOFTWARE))
 		net_enable_timestamp();
 
 	return 0;
@@ -587,7 +598,8 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	master_icsk = inet_csk(master_sk);
 
 	/* Need to set this here - it is needed by mptcp_inherit_sk */
-	master_sk->sk_prot = master_sk->sk_prot_creator = meta_sk->sk_prot;
+	master_sk->sk_prot = meta_sk->sk_prot;
+	master_sk->sk_prot_creator = meta_sk->sk_prot;
 	master_icsk->icsk_af_ops = meta_icsk->icsk_af_ops;
 
 	mpcb = kmem_cache_zalloc(mptcp_cb_cache, GFP_ATOMIC);
@@ -617,7 +629,7 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 		newnp->opt = NULL;
 		newnp->pktoptions = NULL;
 		xchg(&newnp->rxpmtu, NULL);
-	} else if (meta_sk->sk_family == AF_INET6){
+	} else if (meta_sk->sk_family == AF_INET6) {
 		struct ipv6_pinfo *newnp;
 
 		/* Meta is IPv4. Initialize pinet6 for the master-sk. */
@@ -662,7 +674,9 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	idsn = ntohll(idsn) + 1;
 	mpcb->rcv_high_order[0] = idsn >> 32;
 	mpcb->rcv_high_order[1] = mpcb->rcv_high_order[0] + 1;
-	meta_tp->copied_seq = meta_tp->rcv_nxt = meta_tp->rcv_wup = (u32) idsn;
+	meta_tp->copied_seq = (u32) idsn;
+	meta_tp->rcv_nxt = (u32) idsn;
+	meta_tp->rcv_wup = (u32) idsn;
 
 	meta_tp->snd_wl1 = meta_tp->rcv_nxt - 1;
 	meta_tp->snd_wnd = window;
@@ -766,7 +780,8 @@ struct sock *mptcp_sk_clone(const struct sock *sk, int family, const gfp_t prior
 			return NULL;
 
 		/* Set these pointers - they are needed by mptcp_inherit_sk */
-		newsk->sk_prot = newsk->sk_prot_creator = &tcp_prot;
+		newsk->sk_prot = &tcp_prot;
+		newsk->sk_prot_creator = &tcp_prot;
 		inet_csk(newsk)->icsk_af_ops = &ipv4_specific;
 		newsk->sk_family = AF_INET;
 	}
@@ -776,7 +791,8 @@ struct sock *mptcp_sk_clone(const struct sock *sk, int family, const gfp_t prior
 		if (!newsk)
 			return NULL;
 
-		newsk->sk_prot = newsk->sk_prot_creator = &tcpv6_prot;
+		newsk->sk_prot = &tcpv6_prot;
+		newsk->sk_prot_creator = &tcpv6_prot;
 		if (family == AF_INET)
 			inet_csk(newsk)->icsk_af_ops = &ipv6_mapped;
 		else
@@ -847,24 +863,22 @@ int mptcp_add_sock(struct sock *meta_sk, struct sock *sk, u8 rem_id, gfp_t flags
 	sk->sk_destruct = mptcp_sock_destruct;
 
 	if (sk->sk_family == AF_INET)
-		mptcp_debug("%s: token %#x pi %d, src_addr:%pI4:%d dst_addr:"
-				"%pI4:%d, cnt_subflows now %d\n", __func__ ,
-				mpcb->mptcp_loc_token,
-				tp->mptcp->path_index,
-				&((struct inet_sock *) tp)->inet_saddr,
-				ntohs(((struct inet_sock *) tp)->inet_sport),
-				&((struct inet_sock *) tp)->inet_daddr,
-				ntohs(((struct inet_sock *) tp)->inet_dport),
-				mpcb->cnt_subflows);
+		mptcp_debug("%s: token %#x pi %d, src_addr:%pI4:%d dst_addr:%pI4:%d, cnt_subflows now %d\n",
+			    __func__ , mpcb->mptcp_loc_token,
+			    tp->mptcp->path_index,
+			    &((struct inet_sock *)tp)->inet_saddr,
+			    ntohs(((struct inet_sock *)tp)->inet_sport),
+			    &((struct inet_sock *)tp)->inet_daddr,
+			    ntohs(((struct inet_sock *)tp)->inet_dport),
+			    mpcb->cnt_subflows);
 	else
-		mptcp_debug("%s: token %#x pi %d, src_addr:%pI6:%d dst_addr:"
-				"%pI6:%d, cnt_subflows now %d\n", __func__ ,
-				mpcb->mptcp_loc_token,
-				tp->mptcp->path_index, &inet6_sk(sk)->saddr,
-				ntohs(((struct inet_sock *) tp)->inet_sport),
-				&inet6_sk(sk)->daddr,
-				ntohs(((struct inet_sock *) tp)->inet_dport),
-				mpcb->cnt_subflows);
+		mptcp_debug("%s: token %#x pi %d, src_addr:%pI6:%d dst_addr:%pI6:%d, cnt_subflows now %d\n",
+			    __func__ , mpcb->mptcp_loc_token,
+			    tp->mptcp->path_index, &inet6_sk(sk)->saddr,
+			    ntohs(((struct inet_sock *)tp)->inet_sport),
+			    &inet6_sk(sk)->daddr,
+			    ntohs(((struct inet_sock *)tp)->inet_dport),
+			    mpcb->cnt_subflows);
 
 	return 0;
 }
@@ -874,7 +888,7 @@ void mptcp_del_sock(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk), *tp_prev;
 	struct mptcp_cb *mpcb;
 
-	if (!tp->mpc || !tp->mptcp->attached)
+	if (!tp->mptcp || !tp->mptcp->attached)
 		return;
 
 	if (tp->mptcp->pre_established) {
@@ -1009,10 +1023,11 @@ void mptcp_cleanup_rbuf(struct sock *meta_sk, int copied)
 		     * receive buffer and there was a small segment
 		     * in queue.
 		     */
-		    (copied > 0 && ((icsk->icsk_ack.pending & ICSK_ACK_PUSHED2)
-				|| ((icsk->icsk_ack.pending & ICSK_ACK_PUSHED)
-				&& !icsk->icsk_ack.pingpong))
-				&& !atomic_read(&meta_sk->sk_rmem_alloc))) {
+		    (copied > 0 &&
+		     ((icsk->icsk_ack.pending & ICSK_ACK_PUSHED2) ||
+		      ((icsk->icsk_ack.pending & ICSK_ACK_PUSHED) &&
+		       !icsk->icsk_ack.pingpong)) &&
+		     !atomic_read(&meta_sk->sk_rmem_alloc))) {
 			time_to_ack = 1;
 			tcp_send_ack(sk);
 		}
@@ -1027,8 +1042,8 @@ void mptcp_cleanup_rbuf(struct sock *meta_sk, int copied)
 	 * Even if window raised up to infinity, do not send window open ACK
 	 * in states, where we will not receive more. It is useless.
 	 */
-	if (copied > 0 && !time_to_ack
-			&& !(meta_sk->sk_shutdown & RCV_SHUTDOWN)) {
+	if (copied > 0 && !time_to_ack &&
+	    !(meta_sk->sk_shutdown & RCV_SHUTDOWN)) {
 		__u32 rcv_window_now = tcp_receive_window(meta_tp);
 
 		/* Optimize, __tcp_select_window() is not cheap. */
@@ -1054,8 +1069,8 @@ void mptcp_cleanup_rbuf(struct sock *meta_sk, int copied)
 		if (subsk)
 			tcp_send_ack(subsk);
 		else
-			printk(KERN_ERR "%s did not find a subsk! "
-					"Should not happen.\n", __func__);
+			pr_err("%s did not find a subsk! Should not happen.\n",
+			       __func__);
 	}
 }
 
@@ -1108,12 +1123,14 @@ void mptcp_sub_close_wq(struct work_struct *work)
 	/* We come from tcp_disconnect. We are sure that meta_sk is set */
 	if (!tp->mpc) {
 		tp->closing = 1;
+		sock_rps_reset_flow(sk);
 		tcp_close(sk, 0);
 		goto exit;
 	}
 
 	if (meta_sk->sk_shutdown == SHUTDOWN_MASK || sk->sk_state == TCP_CLOSE) {
 		tp->closing = 1;
+		sock_rps_reset_flow(sk);
 		tcp_close(sk, 0);
 	} else if (tcp_close_state(sk)) {
 		tcp_send_fin(sk);
@@ -1159,6 +1176,7 @@ void mptcp_sub_close(struct sock *sk, unsigned long delay)
 
 			if (!tp->mpc) {
 				tp->closing = 1;
+				sock_rps_reset_flow(sk);
 				tcp_close(sk, 0);
 				return;
 			}
@@ -1166,6 +1184,7 @@ void mptcp_sub_close(struct sock *sk, unsigned long delay)
 			if (mptcp_meta_sk(sk)->sk_shutdown == SHUTDOWN_MASK ||
 			    sk->sk_state == TCP_CLOSE) {
 				tp->closing = 1;
+				sock_rps_reset_flow(sk);
 				tcp_close(sk, 0);
 			} else if (tcp_close_state(sk)) {
 				tcp_send_fin(sk);
@@ -1224,17 +1243,11 @@ void mptcp_close(struct sock *meta_sk, long timeout)
 	int data_was_unread = 0;
 	int state;
 
-	mptcp_debug("%s: Close of meta_sk with tok %#x\n", __func__,
-			mpcb->mptcp_loc_token);
+	mptcp_debug("%s: Close of meta_sk with tok %#x\n",
+		    __func__, mpcb->mptcp_loc_token);
 
 	mutex_lock(&mpcb->mutex);
-
 	lock_sock(meta_sk);
-
-	mptcp_for_each_sk(mpcb, sk_it) {
-		if (!is_master_tp(tcp_sk(sk_it)))
-			sock_rps_reset_flow(sk_it);
-	}
 
 	if (meta_tp->inside_tk_table) {
 		/* Detach the mpcb from the token hashtable */
@@ -1249,7 +1262,7 @@ void mptcp_close(struct sock *meta_sk, long timeout)
 	 */
 	while ((skb = __skb_dequeue(&meta_sk->sk_receive_queue)) != NULL) {
 		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq -
-			  (mptcp_is_data_fin(skb) ? 1 : 0);
+			  tcp_hdr(skb)->fin;
 		data_was_unread += len;
 		__kfree_skb(skb);
 	}
@@ -1296,6 +1309,19 @@ adjudge_to_death:
 	sock_hold(meta_sk);
 	sock_orphan(meta_sk);
 
+	/* socket will be freed after mptcp_close - we have to prevent
+	 * access from the subflows.
+	 */
+	mptcp_for_each_sk(mpcb, sk_it) {
+		/* Similar to sock_orphan, but we don't set it DEAD, because
+		 * the callbacks are still set and must be called.
+		 */
+		write_lock_bh(&sk_it->sk_callback_lock);
+		sk_set_socket(sk_it, NULL);
+		sk_it->sk_wq  = NULL;
+		write_unlock_bh(&sk_it->sk_callback_lock);
+	}
+
 	/* It is the last release_sock in its life. It will remove backlog. */
 	release_sock(meta_sk);
 
@@ -1331,13 +1357,13 @@ adjudge_to_death:
 			tcp_set_state(meta_sk, TCP_CLOSE);
 			tcp_send_active_reset(meta_sk, GFP_ATOMIC);
 			NET_INC_STATS_BH(sock_net(meta_sk),
-					LINUX_MIB_TCPABORTONLINGER);
+					 LINUX_MIB_TCPABORTONLINGER);
 		} else {
 			const int tmo = tcp_fin_time(meta_sk);
 
 			if (tmo > TCP_TIMEWAIT_LEN) {
 				inet_csk_reset_keepalive_timer(meta_sk,
-						tmo - TCP_TIMEWAIT_LEN);
+							       tmo - TCP_TIMEWAIT_LEN);
 			} else {
 				tcp_time_wait(meta_sk, TCP_FIN_WAIT2, tmo);
 				goto out;
@@ -1348,12 +1374,11 @@ adjudge_to_death:
 		sk_mem_reclaim(meta_sk);
 		if (tcp_too_many_orphans(meta_sk, 0)) {
 			if (net_ratelimit())
-				printk(KERN_INFO "MPTCP: too many of orphaned "
-				       "sockets\n");
+				pr_info("MPTCP: too many of orphaned sockets\n");
 			tcp_set_state(meta_sk, TCP_CLOSE);
 			tcp_send_active_reset(meta_sk, GFP_ATOMIC);
 			NET_INC_STATS_BH(sock_net(meta_sk),
-					LINUX_MIB_TCPABORTONMEMORY);
+					 LINUX_MIB_TCPABORTONMEMORY);
 		}
 	}
 
@@ -1511,7 +1536,10 @@ struct sock *mptcp_check_req_child(struct sock *meta_sk, struct sock *child,
 	sk_set_socket(child, meta_sk->sk_socket);
 	child->sk_wq = meta_sk->sk_wq;
 
-	if (mptcp_add_sock(meta_sk, child, mtreq->rem_id, GFP_ATOMIC))
+	if (mptcp_add_sock(meta_sk, child, mtreq->rem_id, GFP_ATOMIC)) {
+		child_tp->mpc = 0; /* Has been inherited, but now
+				    * child_tp->mptcp is NULL
+				    */
 		/* TODO when we support acking the third ack for new subflows,
 		 * we should silently discard this third ack, by returning NULL.
 		 *
@@ -1519,6 +1547,7 @@ struct sock *mptcp_check_req_child(struct sock *meta_sk, struct sock *child,
 		 * fully add the socket to the meta-sk.
 		 */
 		goto teardown;
+	}
 
 	/* The child is a clone of the meta socket, we must now reset
 	 * some of the fields
@@ -1548,15 +1577,15 @@ teardown:
 struct workqueue_struct *mptcp_wq;
 
 /* General initialization of mptcp */
-static int __init mptcp_init(void)
+void __init mptcp_init(void)
 {
-	int ret = -ENOMEM;
 #ifdef CONFIG_SYSCTL
 	struct ctl_path path[] = {
 		{ .procname = "net" },
 		{ .procname = "mptcp" },
 		{ },
 	};
+	struct ctl_table_header *mptcp_sysctl;
 #endif
 	mptcp_sock_cache = kmem_cache_create("mptcp_sock",
 					     sizeof(struct mptcp_tcp_sock),
@@ -1575,19 +1604,17 @@ static int __init mptcp_init(void)
 	if (!mptcp_wq)
 		goto alloc_workqueue_failed;
 
-	ret = mptcp_pm_init();
-	if (ret)
+	if (mptcp_pm_init())
 		goto mptcp_pm_failed;
 
 #ifdef CONFIG_SYSCTL
-	if (!register_net_sysctl_table(&init_net, path, mptcp_table)) {
-		ret = -ENOMEM;
+	mptcp_sysctl = register_net_sysctl_table(&init_net, path, mptcp_table);
+	if (!mptcp_sysctl)
 		goto register_sysctl_failed;
-	}
 #endif
 
 out:
-	return ret;
+	return;
 
 #ifdef CONFIG_SYSCTL
 register_sysctl_failed:
@@ -1599,8 +1626,4 @@ alloc_workqueue_failed:
 	kmem_cache_destroy(mptcp_cb_cache);
 mptcp_cb_cache_failed:
 	kmem_cache_destroy(mptcp_sock_cache);
-
-	goto out;
 }
-
-late_initcall(mptcp_init);

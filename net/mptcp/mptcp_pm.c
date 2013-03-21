@@ -53,7 +53,7 @@ static inline u32 mptcp_hash_tk(u32 token)
 	return token % MPTCP_HASH_SIZE;
 }
 
-struct hlist_nulls_head tk_hashtable[MPTCP_HASH_SIZE];
+static struct hlist_nulls_head tk_hashtable[MPTCP_HASH_SIZE];
 
 /* This second hashtable is needed to retrieve request socks
  * created as a result of a join request. While the SYN contains
@@ -211,7 +211,7 @@ void mptcp_hash_remove(struct tcp_sock *meta_tp)
 	rcu_read_unlock();
 }
 
-u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock* sk)
+u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk)
 {
 	int i;
 
@@ -222,8 +222,8 @@ u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock* sk)
 				return mpcb->locaddr4[i].id;
 		}
 
-		mptcp_debug("%s %pI4 not locally found\n",
-				__func__, &inet_sk(sk)->inet_saddr);
+		mptcp_debug("%s %pI4 not locally found\n", __func__,
+			    &inet_sk(sk)->inet_saddr);
 		BUG();
 	}
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
@@ -234,8 +234,8 @@ u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock* sk)
 				return mpcb->locaddr6[i].id;
 		}
 
-		mptcp_debug("%s %pI6 not locally found\n",
-				__func__, &inet6_sk(sk)->saddr);
+		mptcp_debug("%s %pI6 not locally found\n", __func__,
+			    &inet6_sk(sk)->saddr);
 		BUG();
 	}
 #endif /* CONFIG_IPV6 */
@@ -292,10 +292,9 @@ void mptcp_set_addresses(struct sock *meta_sk)
 				i = __mptcp_find_free_index(mpcb->loc4_bits, -1,
 							    mpcb->next_v4_index);
 				if (i < 0) {
-					mptcp_debug("%s: At max num of local "
-						"addresses: %d --- not adding "
-						"address: %pI4\n", __func__,
-						MPTCP_MAX_ADDR, &ifa_address);
+					mptcp_debug("%s: At max num of local addresses: %d --- not adding address: %pI4\n",
+						    __func__, MPTCP_MAX_ADDR,
+						    &ifa_address);
 					goto out;
 				}
 				mpcb->locaddr4[i].addr.s_addr = ifa_address;
@@ -334,10 +333,9 @@ cont_ipv6:
 				i = __mptcp_find_free_index(mpcb->loc6_bits, -1,
 							    mpcb->next_v6_index);
 				if (i < 0) {
-					mptcp_debug("%s: At max num of local"
-						"addresses: %d --- not adding"
-						"address: %pI6\n", __func__,
-						MPTCP_MAX_ADDR, &ifa6->addr);
+					mptcp_debug("%s: At max num of local addresses: %d --- not adding address: %pI6\n",
+						    __func__, MPTCP_MAX_ADDR,
+						    &ifa6->addr);
 					goto out;
 				}
 
@@ -389,12 +387,13 @@ int mptcp_check_req(struct sk_buff *skb, struct net *net)
 			kfree_skb(skb);
 			return 1;
 		}
-	} else if (skb->protocol == htons(ETH_P_IP))
+	} else if (skb->protocol == htons(ETH_P_IP)) {
 		tcp_v4_do_rcv(meta_sk, skb);
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-	else /* IPv6 */
+	} else { /* IPv6 */
 		tcp_v6_do_rcv(meta_sk, skb);
 #endif /* CONFIG_IPV6 */
+	}
 	bh_unlock_sock(meta_sk);
 	sock_put(meta_sk); /* Taken by mptcp_vX_search_req */
 	return 1;
@@ -477,17 +476,18 @@ int mptcp_lookup_join(struct sk_buff *skb, struct inet_timewait_sock *tw)
 		if (unlikely(sk_add_backlog(meta_sk, skb))) {
 			bh_unlock_sock(meta_sk);
 			NET_INC_STATS_BH(sock_net(meta_sk),
-					LINUX_MIB_TCPBACKLOGDROP);
+					 LINUX_MIB_TCPBACKLOGDROP);
 			sock_put(meta_sk); /* Taken by mptcp_hash_find */
 			kfree_skb(skb);
 			return 1;
 		}
-	} else if (skb->protocol == htons(ETH_P_IP))
+	} else if (skb->protocol == htons(ETH_P_IP)) {
 		tcp_v4_do_rcv(meta_sk, skb);
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-	else
+	} else {
 		tcp_v6_do_rcv(meta_sk, skb);
 #endif /* CONFIG_IPV6 */
+	}
 	bh_unlock_sock(meta_sk);
 	sock_put(meta_sk); /* Taken by mptcp_hash_find */
 	return 1;
@@ -506,18 +506,27 @@ int mptcp_do_join_short(struct sk_buff *skb, struct mptcp_options_received *mopt
 		return -1;
 	}
 
-	if ( tcp_sk(meta_sk)->mpcb->infinite_mapping) {
-		/* We are in fallback-mode - thus no new subflows!!! */
-		sock_put(meta_sk); /* Taken by mptcp_hash_find */
-		return -1;
-	}
-
 	TCP_SKB_CB(skb)->mptcp_flags = MPTCPHDR_JOIN;
 
 	/* OK, this is a new syn/join, let's create a new open request and
 	 * send syn+ack
 	 */
 	bh_lock_sock(meta_sk);
+
+	/* This check is also done in mptcp_vX_do_rcv. But, there we cannot
+	 * call tcp_vX_send_reset, because we hold already two socket-locks.
+	 * (the listener and the meta from above)
+	 *
+	 * And the send-reset will try to take yet another one (ip_send_reply).
+	 * Thus, we propagate the reset up to tcp_rcv_state_process.
+	 */
+	if (tcp_sk(meta_sk)->mpcb->infinite_mapping ||
+	    meta_sk->sk_state == TCP_CLOSE || !tcp_sk(meta_sk)->inside_tk_table) {
+		bh_unlock_sock(meta_sk);
+		sock_put(meta_sk); /* Taken by mptcp_hash_find */
+		return -1;
+	}
+
 	if (sock_owned_by_user(meta_sk)) {
 		skb->sk = meta_sk;
 		TCP_SKB_CB(skb)->mptcp_flags = MPTCPHDR_JOIN;
@@ -707,7 +716,8 @@ void mptcp_create_subflows(struct sock *meta_sk)
 {
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 
-	if ((mpcb->master_sk && !tcp_sk(mpcb->master_sk)->mptcp->fully_established) ||
+	if ((mpcb->master_sk &&
+	     !tcp_sk(mpcb->master_sk)->mptcp->fully_established) ||
 	    mpcb->infinite_mapping ||
 	    mpcb->server_side ||
 	    sock_flag(meta_sk, SOCK_DEAD))
@@ -727,6 +737,7 @@ void mptcp_address_worker(struct work_struct *work)
 	struct net_device *dev;
 	int i;
 
+	mutex_lock(&mpcb->mutex);
 	lock_sock(meta_sk);
 
 	if (sock_flag(meta_sk, SOCK_DEAD))
@@ -910,6 +921,7 @@ next_loc6_addr:
 	local_bh_enable();
 exit:
 	release_sock(meta_sk);
+	mutex_unlock(&mpcb->mutex);
 	sock_put(meta_sk);
 }
 
@@ -948,7 +960,7 @@ int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family)
 				continue;
 
 			if (!meta_tp->mpc || !is_meta_sk(meta_sk) ||
-			     mpcb->infinite_mapping) {
+			    mpcb->infinite_mapping) {
 				sock_put(meta_sk);
 				continue;
 			}
@@ -993,7 +1005,8 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 	for (i = 0; i < MPTCP_HASH_SIZE; i++) {
 		struct hlist_nulls_node *node;
 		rcu_read_lock_bh();
-		hlist_nulls_for_each_entry_rcu(meta_tp, node, &tk_hashtable[i], tk_table) {
+		hlist_nulls_for_each_entry_rcu(meta_tp, node,
+					       &tk_hashtable[i], tk_table) {
 			struct mptcp_cb *mpcb = meta_tp->mpcb;
 			struct sock *meta_sk = (struct sock *)meta_tp;
 			struct inet_sock *isk = inet_sk(meta_sk);
@@ -1006,9 +1019,7 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 				   mpcb->mptcp_rem_token);
 			if (meta_sk->sk_family == AF_INET ||
 			    mptcp_v6_is_v4_mapped(meta_sk)) {
-				seq_printf(seq, " 0 %08X:%04X "
-					   "                        "
-					   "%08X:%04X                        ",
+				seq_printf(seq, " 0 %08X:%04X                         %08X:%04X                        ",
 					   isk->inet_saddr,
 					   ntohs(isk->inet_sport),
 					   isk->inet_daddr,
@@ -1017,8 +1028,7 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 			} else if (meta_sk->sk_family == AF_INET6) {
 				struct in6_addr *src = &isk->pinet6->saddr;
 				struct in6_addr *dst = &isk->pinet6->daddr;
-				seq_printf(seq, " 1 %08X%08X%08X%08X:%04X "
-					   "%08X%08X%08X%08X:%04X",
+				seq_printf(seq, " 1 %08X%08X%08X%08X:%04X %08X%08X%08X%08X:%04X",
 					   src->s6_addr32[0], src->s6_addr32[1],
 					   src->s6_addr32[2], src->s6_addr32[3],
 					   ntohs(isk->inet_sport),
@@ -1028,12 +1038,11 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 #endif
 			}
 			seq_printf(seq, " %02X %02X %08X:%08X %lu",
-					meta_sk->sk_state,
-					mpcb->cnt_subflows,
-					meta_tp->write_seq - meta_tp->snd_una,
-					max_t(int, meta_tp->rcv_nxt -
-						   meta_tp->copied_seq, 0),
-					sock_i_ino(meta_sk));
+				   meta_sk->sk_state, mpcb->cnt_subflows,
+				   meta_tp->write_seq - meta_tp->snd_una,
+				   max_t(int, meta_tp->rcv_nxt -
+					 meta_tp->copied_seq, 0),
+				   sock_i_ino(meta_sk));
 			seq_putc(seq, '\n');
 		}
 		rcu_read_unlock_bh();

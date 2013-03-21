@@ -123,8 +123,8 @@ struct mptcp_options_received {
 	u8	rem_id;		/* Address-id in the MP_JOIN */
 	u8	prio_addr_id;	/* Address-id in the MP_PRIO */
 
-	const unsigned char *add_addr_ptr; /* Pointer to the add-address option */
-	const unsigned char *rem_addr_ptr; /* Pointer to the rem-address option */
+	const unsigned char *add_addr_ptr; /* Pointer to add-address option */
+	const unsigned char *rem_addr_ptr; /* Pointer to rem-address option */
 
 	u32	data_ack;
 	u32	data_seq;
@@ -150,16 +150,15 @@ struct mptcp_tcp_sock {
 		fully_established:1,
 		attached:1,
 		csum_error:1,
-		teardown:1,
 		include_mpc:1,
 		mapping_present:1,
 		map_data_fin:1,
 		low_prio:1, /* use this socket as backup */
 		rcv_low_prio:1, /* Peer sent low-prio option to us */
 		send_mp_prio:1, /* Trigger to send mp_prio on this socket */
-		pre_established:1; /* State between sending 3rd ACK and receiving
-		 	 	    * the fourth ack of new subflows.
-		 	 	    */
+		pre_established:1; /* State between sending 3rd ACK and
+				    * receiving the fourth ack of new subflows.
+				    */
 
 	/* isn: needed to translate abs to relative subflow seqnums */
 	u32	snt_isn;
@@ -203,7 +202,7 @@ struct mptcp_cb {
 		server_side:1,
 		infinite_mapping:1,
 		send_mp_fail:1,
-		dfin_combined:1,   /* Does the DFIN received was combined with a subflow-fin? */
+		dfin_combined:1,   /* Was the DFIN combined with subflow-fin? */
 		passive_close:1,
 		snd_hiseq_index:1, /* Index in snd_high_order of snd_nxt */
 		rcv_hiseq_index:1; /* Index in rcv_high_order of rcv_nxt */
@@ -211,7 +210,6 @@ struct mptcp_cb {
 	/* socket count in this connection */
 	u8 cnt_subflows;
 	u8 cnt_established;
-	u8 last_pi_selected;
 
 	u32 noneligible;	/* Path mask of temporarily non
 				 * eligible subflows by the scheduler
@@ -254,7 +252,7 @@ struct mptcp_cb {
 
 	/* Local addresses */
 	struct mptcp_loc4 locaddr4[MPTCP_MAX_ADDR];
-	u8 loc4_bits; /* Bitfield, indicating which of the above indexes are set */
+	u8 loc4_bits; /* Bitfield indicating which of the above addrs are set */
 	u8 next_v4_index;
 
 	struct mptcp_loc6 locaddr6[MPTCP_MAX_ADDR];
@@ -322,9 +320,9 @@ static inline int mptcp_pi_to_flag(int pi)
  * It is necessary to calculate the effective MSS we will be using when
  * sending data.
  */
-#define MPTCP_SUB_LEN_DSM_ALIGN  MPTCP_SUB_LEN_DSS_ALIGN + 		\
-				 MPTCP_SUB_LEN_SEQ_ALIGN + 		\
-				 MPTCP_SUB_LEN_ACK_ALIGN
+#define MPTCP_SUB_LEN_DSM_ALIGN  (MPTCP_SUB_LEN_DSS_ALIGN +		\
+				  MPTCP_SUB_LEN_SEQ_ALIGN +		\
+				  MPTCP_SUB_LEN_ACK_ALIGN)
 
 #define MPTCP_SUB_ADD_ADDR		3
 #define MPTCP_SUB_LEN_ADD_ADDR4		8
@@ -565,7 +563,7 @@ static inline int mptcp_sub_len_remove_addr_align(u16 bitfield)
 
 static inline int mptcp_sub_len_dss(struct mp_dss *m, int csum)
 {
-	return 4 + m->A * (4 + m->a * 4) + m->M * (10  +m->m * 4 + csum * 2);
+	return 4 + m->A * (4 + m->a * 4) + m->M * (10 + m->m * 4 + csum * 2);
 }
 
 /* Default MSS for MPTCP
@@ -584,7 +582,7 @@ extern struct workqueue_struct *mptcp_wq;
 #define mptcp_debug(fmt, args...)					\
 	do {								\
 		if (unlikely(sysctl_mptcp_debug))			\
-			printk(KERN_DEBUG __FILE__ ": " fmt, ##args);	\
+			pr_err(__FILE__ ": " fmt, ##args);	\
 	} while (0)
 
 /* Iterates over all subflows */
@@ -594,7 +592,7 @@ extern struct workqueue_struct *mptcp_wq;
 #define mptcp_for_each_sk(mpcb, sk)					\
 	for ((sk) = (struct sock *)(mpcb)->connection_list;		\
 	     sk;							\
-	     sk = (struct sock *) tcp_sk(sk)->mptcp->next)
+	     sk = (struct sock *)tcp_sk(sk)->mptcp->next)
 
 #define mptcp_for_each_sk_safe(__mpcb, __sk, __temp)			\
 	for (__sk = (struct sock *)(__mpcb)->connection_list,		\
@@ -609,6 +607,9 @@ extern struct workqueue_struct *mptcp_wq;
 
 #define mptcp_for_each_bit_unset(b, i)					\
 	mptcp_for_each_bit_set(~b, i)
+
+extern struct lock_class_key meta_key;
+extern struct lock_class_key meta_slock_key;
 
 void mptcp_data_ready(struct sock *sk, int bytes);
 void mptcp_write_space(struct sock *sk);
@@ -626,7 +627,6 @@ void mptcp_reinject_data(struct sock *orig_sk, int clone_it);
 void mptcp_update_sndbuf(struct mptcp_cb *mpcb);
 struct sk_buff *mptcp_next_segment(struct sock *sk, int *reinject);
 void mptcp_send_fin(struct sock *meta_sk);
-void mptcp_send_reset(struct sock *sk, struct sk_buff *skb);
 void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority);
 int mptcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		     int push_one, gfp_t gfp);
@@ -678,6 +678,13 @@ void mptcp_set_keepalive(struct sock *sk, int val);
 int mptcp_check_rtt(const struct tcp_sock *tp, int time);
 int mptcp_check_snd_buf(const struct tcp_sock *tp);
 int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buff *skb);
+void __init mptcp_init(void);
+int mptcp_trim_head(struct sock *sk, struct sk_buff *skb, u32 len);
+int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
+		   unsigned int mss_now, int reinject);
+int mptso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
+		   unsigned int mss_now, gfp_t gfp, int reinject);
+void mptcp_destroy_sock(struct sock *sk);
 
 static inline void mptcp_push_pending_frames(struct sock *meta_sk)
 {
@@ -705,9 +712,25 @@ static inline void mptcp_sub_force_close(struct sock *sk)
 		mptcp_sub_close(sk, 0);
 }
 
+static inline void mptcp_send_reset(struct sock *sk)
+{
+	tcp_send_active_reset(sk, GFP_ATOMIC);
+	mptcp_sub_force_close(sk);
+}
+
 static inline int mptcp_is_data_fin(const struct sk_buff *skb)
 {
 	return TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FIN;
+}
+
+/* Is it a data-fin while in infinite mapping mode?
+ * In infinite mode, a subflow-fin is in fact a data-fin.
+ */
+static inline int mptcp_is_data_fin2(const struct sk_buff *skb,
+				     const struct tcp_sock *tp)
+{
+	return (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FIN) ||
+	       (tp->mpcb->infinite_mapping && tcp_hdr(skb)->fin);
 }
 
 static inline int mptcp_is_data_seq(const struct sk_buff *skb)
@@ -917,6 +940,7 @@ static inline void mptcp_set_rto(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sock *sk_it;
+	struct inet_connection_sock *micsk = inet_csk(mptcp_meta_sk(sk));
 	__u32 max_rto = 0;
 
 	if (!tp->mpc)
@@ -927,8 +951,12 @@ static inline void mptcp_set_rto(struct sock *sk)
 		    inet_csk(sk_it)->icsk_rto > max_rto)
 			max_rto = inet_csk(sk_it)->icsk_rto;
 	}
-	if (max_rto)
-		inet_csk(mptcp_meta_sk(sk))->icsk_rto = max_rto << 1;
+	if (max_rto) {
+		micsk->icsk_rto = max_rto << 1;
+
+		/* A successfull rto-measurement - reset backoff counter */
+		micsk->icsk_backoff = 0;
+	}
 }
 
 static inline int mptcp_sysctl_syn_retries(void)
@@ -949,26 +977,26 @@ static inline void mptcp_sub_close_passive(struct sock *sk)
 		mptcp_sub_close(sk, 0);
 }
 
-static inline int mptcp_fallback_infinite(struct tcp_sock *tp,
-					  const struct sk_buff *skb)
+static inline int mptcp_fallback_infinite(struct tcp_sock *tp, int flag)
 {
 	/* If data has been acknowleged on the meta-level, fully_established
 	 * will have been set before and thus we will not fall back to infinite
 	 * mapping.
 	 */
-	if (likely(tp->mptcp->fully_established))
+	if (likely(tp->mptcp->fully_established && !tp->mpcb->infinite_mapping))
 		return 0;
 
-	if (TCP_SKB_CB(skb)->flags & (TCPHDR_SYN | TCPHDR_FIN))
+	if (!(flag & FLAG_DATA_ACKED))
 		return 0;
 
-	printk(KERN_ERR"%s %#x will fallback - pi %d from %pS, seq %u\n", __func__,
-		    tp->mpcb->mptcp_loc_token, tp->mptcp->path_index,
-		    __builtin_return_address(0), TCP_SKB_CB(skb)->seq);
-	if (is_master_tp(tp))
-		tp->mpcb->send_infinite_mapping = 1;
-	else
+	pr_err("%s %#x will fallback - pi %d from %pS\n", __func__,
+	       tp->mpcb->mptcp_loc_token, tp->mptcp->path_index,
+	       __builtin_return_address(0));
+	if (!is_master_tp(tp))
 		return MPTCP_FLAG_SEND_RESET;
+
+	tp->mpcb->infinite_mapping = 1;
+	tp->mptcp->fully_established = 1;
 
 	return 0;
 }
@@ -1031,11 +1059,10 @@ static inline int mptcp_v6_is_v4_mapped(struct sock *sk)
 	return sk->sk_family == AF_INET6 &&
 		ipv6_addr_type(&inet6_sk(sk)->saddr) == IPV6_ADDR_MAPPED;
 }
-
 #else /* CONFIG_MPTCP */
 #define mptcp_debug(fmt, args...)	\
 	do {				\
-	} while(0)
+	} while (0)
 
 /* Without MPTCP, we just do one iteration
  * over the only socket available. This assumes that
@@ -1152,8 +1179,7 @@ static inline int mptcp_select_size(const struct sock *meta_sk)
 }
 static inline void mptcp_key_sha1(u64 key, u32 *token, u64 *idsn) {}
 static inline void mptcp_sub_close_passive(struct sock *sk) {}
-static inline int mptcp_fallback_infinite(const struct tcp_sock *tp,
-					  const struct sk_buff *skb)
+static inline int mptcp_fallback_infinite(const struct tcp_sock *tp, int flag)
 {
 	return 0;
 }
@@ -1170,8 +1196,7 @@ static inline int mptcp_sysctl_syn_retries(void)
 {
 	return 0;
 }
-static inline void mptcp_send_reset(const struct sock *sk,
-				    const struct sk_buff *skb) {}
+static inline void mptcp_send_reset(const struct sock *sk) {}
 static inline void mptcp_send_active_reset(struct sock *meta_sk,
 					   gfp_t priority) {}
 static inline int mptcp_write_xmit(struct sock *sk, unsigned int mss_now,
@@ -1192,6 +1217,23 @@ static inline int mptcp_handle_options(struct sock *sk,
 	return 0;
 }
 static inline void mptcp_reset_mopt(struct tcp_sock *tp) {}
+static inline void  __init mptcp_init(void) {}
+static inline int mptcp_trim_head(struct sock *sk, struct sk_buff *skb, u32 len)
+{
+	return 0;
+}
+static inline int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
+				 unsigned int mss_now, int reinject)
+{
+	return 0;
+}
+static inline int mptso_fragment(struct sock *sk, struct sk_buff *skb,
+				 unsigned int len, unsigned int mss_now,
+				 gfp_t gfp, int reinject)
+{
+	return 0;
+}
+static inline void mptcp_destroy_sock(struct sock *sk) {}
 #endif /* CONFIG_MPTCP */
 
 #endif /* _MPTCP_H */

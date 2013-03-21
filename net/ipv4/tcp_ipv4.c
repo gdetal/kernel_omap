@@ -603,9 +603,6 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 #ifdef CONFIG_TCP_MD5SIG
 		__be32 opt[(TCPOLEN_MD5SIG_ALIGNED >> 2)];
 #endif
-#ifdef CONFIG_MPTCP
-		struct mp_fail mpfail;
-#endif
 	} rep;
 	struct ip_reply_arg arg;
 #ifdef CONFIG_TCP_MD5SIG
@@ -655,20 +652,6 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 				     ip_hdr(skb)->daddr, &rep.th);
 	}
 #endif
-#ifdef CONFIG_MPTCP
-	if (sk && tcp_sk(sk)->mpc && tcp_sk(sk)->mptcp->csum_error) {
-		/* We had a checksum-error? -> Include MP_FAIL */
-		rep.mpfail.kind = TCPOPT_MPTCP;
-		rep.mpfail.len = MPTCP_SUB_LEN_FAIL;
-		rep.mpfail.sub = MPTCP_SUB_FAIL;
-		rep.mpfail.rsv1 = 0;
-		rep.mpfail.rsv2 = 0;
-		rep.mpfail.data_seq = htonll(tcp_sk(sk)->mpcb->csum_cutoff_seq);
-
-		arg.iov[0].iov_len += MPTCP_SUB_LEN_FAIL_ALIGN;
-		rep.th.doff = arg.iov[0].iov_len / 4;
-	}
-#endif /* CONFIG_MPTCP */
 	arg.csum = csum_tcpudp_nofold(ip_hdr(skb)->daddr,
 				      ip_hdr(skb)->saddr, /* XXX */
 				      arg.iov[0].iov_len, IPPROTO_TCP, 0);
@@ -687,9 +670,12 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 	TCP_INC_STATS_BH(net, TCP_MIB_OUTSEGS);
 	TCP_INC_STATS_BH(net, TCP_MIB_OUTRSTS);
 
-#ifdef CONFIG_MPTCP
-	if (sk && tcp_sk(sk)->mpc && tcp_sk(sk)->mptcp->teardown)
-		tcp_done(sk);
+#ifdef CONFIG_TCP_MD5SIG
+release_sk1:
+	if (sk1) {
+		rcu_read_unlock();
+		sock_put(sk1);
+	}
 #endif
 }
 
@@ -2055,26 +2041,16 @@ void tcp_v4_destroy_sock(struct sock *sk)
 
 	tcp_cleanup_congestion_control(sk);
 
+	if (tp->mpc)
+		mptcp_destroy_sock(sk);
+	if (tp->inside_tk_table)
+		mptcp_hash_remove(tp);
+
+	/* Cleanup up the write buffer. */
+	tcp_write_queue_purge(sk);
+
 	/* Cleans up our, hopefully empty, out_of_order_queue. */
-	if (is_meta_sk(sk)) {
-		/* Cleanup up the write buffer. */
-		tcp_write_queue_purge(sk);
-
-		__skb_queue_purge(&tp->mpcb->reinject_queue);
-		mptcp_purge_ofo_queue(tp);
-	} else {
-		/* mptcp_del_sock MUST be before tcp_write_queue_purge because
-		 * we try to reinject
-		 */
-		mptcp_del_sock(sk);
-
-		/* Cleanup up the write buffer. */
-		tcp_write_queue_purge(sk);
-
-		if (tp->inside_tk_table)
-			mptcp_hash_remove(tp);
-		__skb_queue_purge(&tp->out_of_order_queue);
-	}
+	__skb_queue_purge(&tp->out_of_order_queue);
 
 #ifdef CONFIG_TCP_MD5SIG
 	/* Clean up the MD5 key list, if any */

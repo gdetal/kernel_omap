@@ -3314,12 +3314,7 @@ static int tcp_clean_rtx_queue(struct sock *sk, int prior_fackets,
 		if (!fully_acked)
 			break;
 
-		if (tp->mpc)
-			mptcp_clean_rtx_infinite(skb, sk);
 		tcp_unlink_write_queue(skb, sk);
-
-		if (tp->mpc)
-			flag |= mptcp_fallback_infinite(tp, skb);
 
 		sk_wmem_free_skb(sk, skb);
 		tp->scoreboard_skb_hint = NULL;
@@ -3714,9 +3709,16 @@ static int tcp_ack(struct sock *sk, struct sk_buff *skb, int flag)
 	/* See if we can take anything off of the retransmit queue. */
 	flag |= tcp_clean_rtx_queue(sk, prior_fackets, prior_snd_una);
 
-	if (flag & MPTCP_FLAG_SEND_RESET) {
-		mptcp_send_reset(sk, skb);
-		goto invalid_ack;
+	if (tp->mpc) {
+		flag |= mptcp_fallback_infinite(tp, flag);
+
+		if (flag & MPTCP_FLAG_SEND_RESET) {
+			pr_err("%s resetting flow\n", __func__);
+			mptcp_send_reset(sk);
+			goto invalid_ack;
+		}
+
+		mptcp_clean_rtx_infinite(skb, sk);
 	}
 
 	if (tp->frto_counter)
@@ -5660,8 +5662,7 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 					(u32 *)hash_mac_check);
 			if (memcmp(hash_mac_check,
 				   (char *)&tp->mptcp->rx_opt.mptcp_recv_tmac, 8)) {
-				sock_orphan(sk);
-				tp->mptcp->teardown = 1;
+				mptcp_sub_force_close(sk);
 				goto reset_and_undo;
 			}
 
@@ -5715,10 +5716,6 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		tp->snd_wl1 = TCP_SKB_CB(skb)->seq;
 		tcp_ack(sk, skb, FLAG_SLOWPATH);
 
-		/* Ok.. it's good. Set up sequence numbers and
-		 * move to established.
-		 */
-#ifdef CONFIG_MPTCP
 		if (tp->mpc && !is_master_tp(tp)) {
 			/* Timer for repeating the ACK until an answer
 			 * arrives. Used only when establishing an additional
@@ -5727,7 +5724,10 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 			sk_reset_timer(sk, &tp->mptcp->mptcp_ack_timer,
 				       jiffies + icsk->icsk_rto);
 		}
-#endif
+
+		/* Ok.. it's good. Set up sequence numbers and
+		 * move to established.
+		 */
 		tp->rcv_nxt = TCP_SKB_CB(skb)->seq + 1;
 		tp->rcv_wup = TCP_SKB_CB(skb)->seq + 1;
 

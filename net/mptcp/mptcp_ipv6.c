@@ -98,7 +98,7 @@ static int mptcp_v6v4_send_synack(struct sock *meta_sk, struct request_sock *req
 				  struct request_values *rvp)
 {
 	struct inet6_request_sock *treq = inet6_rsk(req);
-	struct sk_buff * skb;
+	struct sk_buff *skb;
 	struct flowi6 fl6;
 	struct dst_entry *dst;
 	int err;
@@ -240,7 +240,8 @@ struct sock *mptcp_v6v4_syn_recv_sock(struct sock *meta_sk, struct sk_buff *skb,
 	tcp_initialize_rcv_mss(newsk);
 	newtp->total_retrans = req->retrans;
 
-	newinet->inet_daddr = newinet->inet_saddr = LOOPBACK4_IPV6;
+	newinet->inet_daddr = LOOPBACK4_IPV6;
+	newinet->inet_saddr = LOOPBACK4_IPV6;
 	newinet->inet_rcv_saddr = LOOPBACK4_IPV6;
 
 	if (__inet_inherit_port(meta_sk, newsk) < 0) {
@@ -442,10 +443,9 @@ int mptcp_v6_add_raddress(struct mptcp_cb *mpcb, const struct in6_addr *addr,
 		 */
 		if (rem6->id == id) {
 			/* update the address */
-			mptcp_debug("%s: updating old addr: %pI6 \
-					to addr %pI6 with id:%d\n",
-					__func__, &rem6->addr, addr, id);
-			ipv6_addr_copy(&rem6->addr, addr);
+			mptcp_debug("%s: updating old addr: %pI6 to addr %pI6 with id:%d\n",
+				    __func__, &rem6->addr, addr, id);
+			rem6->addr = *addr;
 			rem6->port = port;
 			mpcb->list_rcvd = 1;
 			return 0;
@@ -455,9 +455,8 @@ int mptcp_v6_add_raddress(struct mptcp_cb *mpcb, const struct in6_addr *addr,
 	i = mptcp_find_free_index(mpcb->rem6_bits);
 	/* Do we have already the maximum number of local/remote addresses? */
 	if (i < 0) {
-		mptcp_debug("%s: At max num of remote addresses: %d --- not "
-				"adding address: %pI6\n",
-				__func__, MPTCP_MAX_ADDR, addr);
+		mptcp_debug("%s: At max num of remote addresses: %d --- not adding address: %pI6\n",
+			    __func__, MPTCP_MAX_ADDR, addr);
 		return -1;
 	}
 
@@ -562,8 +561,9 @@ int mptcp_v6_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 			/* Currently we make two calls to mptcp_find_join(). This
 			 * can probably be optimized. */
 			if (mptcp_v6_add_raddress(mpcb,
-					(struct in6_addr *)&ipv6_hdr(skb)->saddr, 0,
-					join_opt->addr_id) < 0)
+						  (struct in6_addr *)&ipv6_hdr(skb)->saddr,
+						  0,
+						  join_opt->addr_id) < 0)
 				goto reset_and_discard;
 			mpcb->list_rcvd = 0;
 
@@ -594,7 +594,7 @@ struct sock *mptcp_v6_search_req(const __be16 rport, const struct in6_addr *radd
 	spin_lock(&mptcp_reqsk_hlock);
 	list_for_each_entry(mtreq,
 			    &mptcp_reqsk_htb[inet6_synq_hash(raddr, rport, 0,
-					    	    	     MPTCP_HASH_SIZE)],
+							     MPTCP_HASH_SIZE)],
 			    collide_tuple) {
 		const struct inet6_request_sock *treq = inet6_rsk(rev_mptcp_rsk(mtreq));
 		meta_sk = mtreq->mpcb->meta_sk;
@@ -632,7 +632,7 @@ int mptcp_init6_subsockets(struct sock *meta_sk, const struct mptcp_loc6 *loc,
 	 * There is a special case as the IPv6 address of the initial subflow
 	 * has an id = 0. The other ones have id's in the range [8, 16[.
 	 */
-	rem->bitfield |= (1 << (loc->id - min(loc->id, (u8)MPTCP_MAX_ADDR)));
+	rem->bitfield |= (1 << (loc->id - min_t(u8, loc->id, MPTCP_MAX_ADDR)));
 
 	/** First, create and prepare the new socket */
 
@@ -650,6 +650,10 @@ int mptcp_init6_subsockets(struct sock *meta_sk, const struct mptcp_loc6 *loc,
 
 	sk = sock.sk;
 	tp = tcp_sk(sk);
+
+	/* All subsockets need the MPTCP-lock-class */
+	lockdep_set_class_and_name(&(sk)->sk_lock.slock, &meta_slock_key, "slock-AF_INET-MPTCP");
+	lockdep_init_map(&(sk)->sk_lock.dep_map, "sk_lock-AF_INET-MPTCP", &meta_key, 0);
 
 	if (mptcp_add_sock(meta_sk, sk, rem->id, GFP_KERNEL))
 		goto error;
@@ -674,22 +678,23 @@ int mptcp_init6_subsockets(struct sock *meta_sk, const struct mptcp_loc6 *loc,
 	rem_in.sin6_addr = rem->addr;
 
 	mptcp_debug("%s: token %#x pi %d src_addr:%pI6:%d dst_addr:%pI6:%d\n",
-		    __func__, tcp_sk(meta_sk)->mpcb->mptcp_loc_token, tp->mptcp->path_index,
-		    &loc_in.sin6_addr, ntohs(loc_in.sin6_port), &rem_in.sin6_addr,
+		    __func__, tcp_sk(meta_sk)->mpcb->mptcp_loc_token,
+		    tp->mptcp->path_index, &loc_in.sin6_addr,
+		    ntohs(loc_in.sin6_port), &rem_in.sin6_addr,
 		    ntohs(rem_in.sin6_port));
 
 	ret = sock.ops->bind(&sock, (struct sockaddr *)&loc_in, ulid_size);
 	if (ret < 0) {
-		mptcp_debug(KERN_ERR "%s: MPTCP subsocket bind() "
-				"failed, error %d\n", __func__, ret);
+		mptcp_debug("%s: MPTCP subsocket bind()failed, error %d\n",
+			    __func__, ret);
 		goto error;
 	}
 
 	ret = sock.ops->connect(&sock, (struct sockaddr *)&rem_in,
 				ulid_size, O_NONBLOCK);
 	if (ret < 0 && ret != -EINPROGRESS) {
-		mptcp_debug(KERN_ERR "%s: MPTCP subsocket connect() "
-				"failed, error %d\n", __func__, ret);
+		mptcp_debug("%s: MPTCP subsocket connect() failed, error %d\n",
+			    __func__, ret);
 		goto error;
 	}
 
@@ -832,8 +837,7 @@ void mptcp_pm_addr6_event_handler(struct inet6_ifaddr *ifa, unsigned long event,
 	if ((event == NETDEV_UP || event == NETDEV_CHANGE) && netif_running(ifa->idev->dev)) {
 		i = __mptcp_find_free_index(mpcb->loc6_bits, 0, mpcb->next_v6_index);
 		if (i < 0) {
-			mptcp_debug("MPTCP_PM: NETDEV_UP Reached max "
-				    "number of local IPv6 addresses: %d\n",
+			mptcp_debug("MPTCP_PM: NETDEV_UP Reached max number of local IPv6 addresses: %d\n",
 				    MPTCP_MAX_ADDR);
 			return;
 		}
